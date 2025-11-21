@@ -910,14 +910,21 @@ impl ChatComposer {
                 modifiers,
                 kind: KeyEventKind::Press,
                 ..
-            } if modifiers.contains(KeyModifiers::CONTROL) && ch.eq_ignore_ascii_case(&'g') => {
+            } if modifiers.contains(KeyModifiers::CONTROL)
+                && (ch.eq_ignore_ascii_case(&'g') || ch.eq_ignore_ascii_case(&'i')) =>
+            {
                 if !self.has_focus {
                     return (InputResult::None, false);
                 }
                 if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
                     self.handle_paste(pasted);
                 }
-                self.app_event_tx.send(AppEvent::EditComposerInEditor);
+                let event = if ch.eq_ignore_ascii_case(&'g') {
+                    AppEvent::EditComposerInEditor
+                } else {
+                    AppEvent::ReplyInEditor
+                };
+                self.app_event_tx.send(event);
                 (InputResult::None, true)
             }
             // -------------------------------------------------------------
@@ -2062,6 +2069,41 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_i_sends_reply_event_and_flushes_burst() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        let now = std::time::Instant::now();
+        composer
+            .paste_burst
+            .begin_with_retro_grabbed("paste".to_string(), now);
+        composer.paste_burst.append_char_to_buffer('1', now);
+
+        let (result, needs_redraw) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));
+
+        assert_eq!(result, InputResult::None);
+        assert!(needs_redraw);
+        assert_eq!(composer.current_text(), "paste1");
+
+        match rx.try_recv() {
+            Ok(AppEvent::ReplyInEditor) => {}
+            other => panic!("unexpected app event: {other:?}"),
+        }
+    }
+
+    #[test]
     fn ctrl_g_ignored_without_focus() {
         use crossterm::event::KeyCode;
         use crossterm::event::KeyEvent;
@@ -2082,6 +2124,34 @@ mod tests {
 
         let (result, needs_redraw) =
             composer.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+
+        assert_eq!(result, InputResult::None);
+        assert!(!needs_redraw);
+        assert_eq!(composer.current_text(), "hi");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn ctrl_i_ignored_without_focus() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_has_focus(false);
+        composer.insert_str("hi");
+
+        let (result, needs_redraw) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL));
 
         assert_eq!(result, InputResult::None);
         assert!(!needs_redraw);

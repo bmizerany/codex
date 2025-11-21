@@ -140,7 +140,6 @@ fn esc_hint_line(esc_backtrack_hint: bool) -> Line<'static> {
 fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
     let mut commands = Line::from("");
     let mut newline = Line::from("");
-    let mut edit_in_editor = Line::from("");
     let mut file_paths = Line::from("");
     let mut paste_image = Line::from("");
     let mut edit_previous = Line::from("");
@@ -152,7 +151,6 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
             match descriptor.id {
                 ShortcutId::Commands => commands = text,
                 ShortcutId::InsertNewline => newline = text,
-                ShortcutId::EditInEditor => edit_in_editor = text,
                 ShortcutId::FilePaths => file_paths = text,
                 ShortcutId::PasteImage => paste_image = text,
                 ShortcutId::EditPrevious => edit_previous = text,
@@ -165,7 +163,6 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
     let ordered = vec![
         commands,
         newline,
-        edit_in_editor,
         file_paths,
         paste_image,
         edit_previous,
@@ -233,7 +230,6 @@ fn context_window_line(percent: Option<i64>) -> Line<'static> {
 enum ShortcutId {
     Commands,
     InsertNewline,
-    EditInEditor,
     FilePaths,
     PasteImage,
     EditPrevious,
@@ -327,15 +323,6 @@ const SHORTCUTS: &[ShortcutDescriptor] = &[
         ],
         prefix: "",
         label: " for newline",
-    },
-    ShortcutDescriptor {
-        id: ShortcutId::EditInEditor,
-        bindings: &[ShortcutBinding {
-            key: key_hint::ctrl(KeyCode::Char('g')),
-            condition: DisplayCondition::Always,
-        }],
-        prefix: "",
-        label: " to open $EDITOR",
     },
     ShortcutDescriptor {
         id: ShortcutId::FilePaths,

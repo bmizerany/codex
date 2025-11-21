@@ -42,6 +42,9 @@ pub(crate) enum AppEvent {
         matches: Vec<FileMatch>,
     },
 
+    /// Open a reply prefilled with the last Codex message quoted in an external editor.
+    ReplyInEditor,
+
     /// Open the current composer draft in an external editor.
     EditComposerInEditor,
 

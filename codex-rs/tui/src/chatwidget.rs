@@ -294,6 +294,7 @@ pub(crate) struct ChatWidget {
     pre_review_token_info: Option<Option<TokenUsageInfo>>,
     // Whether to add a final message separator after the last message
     needs_final_message_separator: bool,
+    last_agent_message: Option<String>,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
     // Feedback sink for /feedback
@@ -475,6 +476,9 @@ impl ChatWidget {
     fn on_task_complete(&mut self, last_agent_message: Option<String>) {
         // If a stream is currently active, finalize it.
         self.flush_answer_stream_with_separator();
+        if let Some(message) = last_agent_message.clone() {
+            self.last_agent_message = Some(message);
+        }
         // Mark task stopped and request redraw now that all content is in history.
         self.bottom_pane.set_task_running(false);
         self.running_commands.clear();
@@ -916,6 +920,12 @@ impl ChatWidget {
         self.flush_active_cell();
 
         if self.stream_controller.is_none() {
+            self.last_agent_message = Some(String::new());
+        }
+        if let Some(message) = self.last_agent_message.as_mut() {
+            message.push_str(&delta);
+        }
+        if self.stream_controller.is_none() {
             if self.needs_final_message_separator {
                 let elapsed_seconds = self
                     .bottom_pane
@@ -1185,6 +1195,7 @@ impl ChatWidget {
             is_review_mode: false,
             pre_review_token_info: None,
             needs_final_message_separator: false,
+            last_agent_message: None,
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1260,6 +1271,7 @@ impl ChatWidget {
             is_review_mode: false,
             pre_review_token_info: None,
             needs_final_message_separator: false,
+            last_agent_message: None,
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
             current_rollout_path: None,
@@ -1752,6 +1764,7 @@ impl ChatWidget {
                         "Reviewer failed to output a response.".to_owned(),
                     ));
                 } else {
+                    self.last_agent_message = Some(explanation.clone());
                     // Show explanation when there are no structured findings.
                     let mut rendered: Vec<ratatui::text::Line<'static>> = vec!["".into()];
                     append_markdown(&explanation, None, &mut rendered);
@@ -1762,6 +1775,7 @@ impl ChatWidget {
             } else {
                 let message_text =
                     codex_core::review_format::format_review_findings_block(&output.findings, None);
+                self.last_agent_message = Some(message_text.clone());
                 let mut message_lines: Vec<ratatui::text::Line<'static>> = Vec::new();
                 append_markdown(&message_text, None, &mut message_lines);
                 let body_cell = AgentMessageCell::new(message_lines, true);
@@ -2713,6 +2727,17 @@ impl ChatWidget {
 
     pub(crate) fn insert_str(&mut self, text: &str) {
         self.bottom_pane.insert_str(text);
+    }
+
+    pub(crate) fn latest_agent_message(&self) -> Option<String> {
+        self.last_agent_message.as_ref().and_then(|msg| {
+            let trimmed = msg.trim_end_matches(&['\n', '\r'][..]).to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
     }
 
     pub(crate) fn composer_text(&self) -> String {

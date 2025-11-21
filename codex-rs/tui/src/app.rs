@@ -427,16 +427,15 @@ impl App {
         Ok(true)
     }
 
-    async fn edit_composer_in_editor(&mut self, tui: &mut tui::Tui) {
+    async fn edit_text_in_editor(&mut self, tui: &mut tui::Tui, text: String) -> Option<String> {
         let command = match Self::editor_command_from_env() {
             Ok(command) => command,
             Err(msg) => {
                 self.chat_widget.add_error_message(msg);
-                return;
+                return None;
             }
         };
 
-        let draft = self.chat_widget.composer_text();
         let tmp = match Builder::new()
             .prefix("codex-composer-")
             .suffix(".txt")
@@ -445,14 +444,14 @@ impl App {
             Ok(tmp) => tmp,
             Err(err) => {
                 self.chat_widget
-                    .add_error_message(format!("Failed to create temp file: {err}"));
-                return;
+                    .add_error_message(format!("Failed to create temp file: {err}",));
+                return None;
             }
         };
-        if let Err(err) = std::fs::write(tmp.path(), draft) {
+        if let Err(err) = std::fs::write(tmp.path(), text) {
             self.chat_widget
-                .add_error_message(format!("Failed to write draft for editor: {err}"));
-            return;
+                .add_error_message(format!("Failed to write draft for editor: {err}",));
+            return None;
         }
 
         let path = tmp.path().to_path_buf();
@@ -499,7 +498,7 @@ impl App {
             self.chat_widget.add_error_message(format!(
                 "Failed to restore the terminal before launching $EDITOR: {err}",
             ));
-            return;
+            return None;
         }
 
         let status_result = match status_result {
@@ -507,17 +506,17 @@ impl App {
             Some(Err(join_err)) => {
                 self.chat_widget
                     .add_error_message(format!("Failed to wait for $EDITOR to exit: {join_err}",));
-                return;
+                return None;
             }
-            None => return,
+            None => return None,
         };
 
         let status = match status_result {
             Ok(status) => status,
             Err(err) => {
                 self.chat_widget
-                    .add_error_message(format!("Failed to run $EDITOR: {err}"));
-                return;
+                    .add_error_message(format!("Failed to run $EDITOR: {err}",));
+                return None;
             }
         };
 
@@ -527,20 +526,46 @@ impl App {
                 .map(|code| format!("Editor exited with status {code}"))
                 .unwrap_or_else(|| "Editor terminated by signal".to_string());
             self.chat_widget.add_error_message(msg);
-            return;
+            return None;
         }
 
         match std::fs::read_to_string(&path) {
-            Ok(edited) => {
-                let normalized = Self::normalize_edited_prompt(edited);
-                let cursor = normalized.len();
-                self.chat_widget
-                    .set_composer_text_with_cursor_preserving_attachments(normalized, cursor);
-            }
+            Ok(edited) => Some(Self::normalize_edited_prompt(edited)),
             Err(err) => {
                 self.chat_widget
-                    .add_error_message(format!("Failed to read edited draft: {err}"));
+                    .add_error_message(format!("Failed to read edited draft: {err}",));
+                None
             }
+        }
+    }
+
+    async fn edit_composer_in_editor(&mut self, tui: &mut tui::Tui) {
+        let draft = self.chat_widget.composer_text();
+        if let Some(normalized) = self.edit_text_in_editor(tui, draft).await {
+            let cursor = normalized.len();
+            self.chat_widget
+                .set_composer_text_with_cursor_preserving_attachments(normalized, cursor);
+        }
+    }
+
+    async fn reply_in_editor(&mut self, tui: &mut tui::Tui) {
+        let Some(message) = self.chat_widget.latest_agent_message() else {
+            self.chat_widget
+                .add_error_message("No Codex message to reply to yet.".to_string());
+            return;
+        };
+
+        let existing_draft = self.chat_widget.composer_text();
+        let mut text = Self::quote_for_reply(&message);
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&existing_draft);
+
+        if let Some(normalized) = self.edit_text_in_editor(tui, text).await {
+            let cursor = normalized.len();
+            self.chat_widget
+                .set_composer_text_with_cursor_preserving_attachments(normalized, cursor);
         }
     }
 
@@ -554,6 +579,20 @@ impl App {
         } else {
             Ok(parts)
         }
+    }
+
+    fn quote_for_reply(message: &str) -> String {
+        message
+            .lines()
+            .map(|line| {
+                if line.is_empty() {
+                    ">".to_string()
+                } else {
+                    format!("> {line}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn normalize_edited_prompt(mut text: String) -> String {
@@ -672,6 +711,9 @@ impl App {
             }
             AppEvent::FileSearchResult { query, matches } => {
                 self.chat_widget.apply_file_search_result(query, matches);
+            }
+            AppEvent::ReplyInEditor => {
+                self.reply_in_editor(tui).await;
             }
             AppEvent::EditComposerInEditor => {
                 self.edit_composer_in_editor(tui).await;
