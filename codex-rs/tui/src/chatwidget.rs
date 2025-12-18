@@ -433,6 +433,10 @@ pub(crate) struct ChatWidget {
     reasoning_buffer: String,
     // Accumulates full reasoning content for transcript-only recording
     full_reasoning_buffer: String,
+    // Accumulates the current agent reply text (markdown source).
+    current_agent_reply: String,
+    // Cached last completed agent reply for reply-in-editor flows.
+    last_agent_reply: Option<String>,
     // Current status header shown in the status indicator.
     current_status_header: String,
     // Previous status header to restore after a transient stream retry.
@@ -563,6 +567,14 @@ impl ChatWidget {
         }
     }
 
+    fn cache_last_agent_reply(&mut self, reply: &str) {
+        let trimmed = reply.trim_end_matches(['\n', '\r']);
+        if trimmed.is_empty() {
+            return;
+        }
+        self.last_agent_reply = Some(trimmed.to_string());
+    }
+
     /// Update the status indicator header and details.
     ///
     /// Passing `None` clears any existing details.
@@ -662,6 +674,8 @@ impl ChatWidget {
     }
 
     fn on_agent_message(&mut self, message: String) {
+        self.cache_last_agent_reply(&message);
+        self.current_agent_reply.clear();
         // If we have a stream_controller, then the final agent message is redundant and will be a
         // duplicate of what has already been streamed.
         if self.stream_controller.is_none() {
@@ -737,6 +751,13 @@ impl ChatWidget {
         // If a stream is currently active, finalize it.
         self.flush_answer_stream_with_separator();
         self.flush_unified_exec_wait_streak();
+        if let Some(message) = last_agent_message.as_ref() {
+            self.cache_last_agent_reply(message);
+            self.current_agent_reply.clear();
+        } else if !self.current_agent_reply.is_empty() {
+            self.cache_last_agent_reply(&self.current_agent_reply);
+            self.current_agent_reply.clear();
+        }
         // Mark task stopped and request redraw now that all content is in history.
         self.agent_turn_running = false;
         self.update_task_running_state();
@@ -1332,6 +1353,11 @@ impl ChatWidget {
         self.flush_active_cell();
 
         if self.stream_controller.is_none() {
+            self.current_agent_reply.clear();
+        }
+        self.current_agent_reply.push_str(&delta);
+
+        if self.stream_controller.is_none() {
             if self.needs_final_message_separator {
                 let elapsed_seconds = self
                     .bottom_pane
@@ -1659,6 +1685,8 @@ impl ChatWidget {
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
+            current_agent_reply: String::new(),
+            last_agent_reply: None,
             current_status_header: String::from("Working"),
             retry_status_header: None,
             thread_id: None,
@@ -1756,6 +1784,8 @@ impl ChatWidget {
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
+            current_agent_reply: String::new(),
+            last_agent_reply: None,
             current_status_header: String::from("Working"),
             retry_status_header: None,
             thread_id: None,
@@ -1913,6 +1943,15 @@ impl ChatWidget {
         self.bottom_pane.composer_text_with_pending()
     }
 
+    pub(crate) fn composer_text(&self) -> String {
+        self.bottom_pane.composer_text()
+    }
+
+    pub(crate) fn set_composer_text_preserve_attachments(&mut self, text: String) {
+        self.bottom_pane
+            .set_composer_text_preserve_attachments(text);
+    }
+
     pub(crate) fn apply_external_edit(&mut self, text: String) {
         self.bottom_pane.apply_external_edit(text);
         self.request_redraw();
@@ -1932,6 +1971,10 @@ impl ChatWidget {
 
     pub(crate) fn can_launch_external_editor(&self) -> bool {
         self.bottom_pane.can_launch_external_editor()
+    }
+
+    pub(crate) fn last_agent_reply(&self) -> Option<&str> {
+        self.last_agent_reply.as_deref()
     }
 
     fn dispatch_command(&mut self, cmd: SlashCommand) {

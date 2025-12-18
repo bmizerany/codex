@@ -115,6 +115,22 @@ fn errors_for_cwd(cwd: &Path, response: &ListSkillsResponseEvent) -> Vec<SkillEr
         .unwrap_or_default()
 }
 
+fn quote_as_email_reply(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::with_capacity(input.len() + 2 * input.lines().count());
+    for (idx, line) in input.split('\n').enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        out.push_str("> ");
+        out.push_str(line);
+    }
+    out
+}
+
 fn emit_skill_load_warnings(app_event_tx: &AppEventSender, errors: &[SkillErrorInfo]) {
     if errors.is_empty() {
         return;
@@ -1460,6 +1476,40 @@ impl App {
                     self.request_external_editor_launch(tui);
                 }
             }
+            KeyEvent {
+                code: KeyCode::Char('r'),
+                modifiers: crossterm::event::KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                if self.overlay.is_none()
+                    && self.chat_widget.can_launch_external_editor()
+                    && self.chat_widget.external_editor_state() == ExternalEditorState::Closed
+                {
+                    if let Some(last_reply) = self.chat_widget.last_agent_reply() {
+                        let current_text = self.chat_widget.composer_text();
+                        let mut combined = String::new();
+                        if !current_text.is_empty() {
+                            combined.push_str(&current_text);
+                            if !current_text.ends_with('\n') {
+                                combined.push('\n');
+                            }
+                            combined.push('\n');
+                        }
+                        combined.push_str(&quote_as_email_reply(last_reply));
+                        combined.push('\n');
+                        combined.push('\n');
+                        self.chat_widget
+                            .set_composer_text_preserve_attachments(combined);
+                        self.request_external_editor_launch(tui);
+                    } else {
+                        self.chat_widget.add_info_message(
+                            "No agent response available to reply to yet.".to_string(),
+                            None,
+                        );
+                    }
+                }
+            }
             // Esc primes/advances backtracking only in normal (not working) mode
             // with the composer focused and empty. In any other state, forward
             // Esc so the active UI (e.g. status indicator, modals, popups)
@@ -1979,5 +2029,17 @@ mod tests {
             summary.resume_command,
             Some("codex resume 123e4567-e89b-12d3-a456-426614174000".to_string())
         );
+    }
+
+    #[test]
+    fn quote_as_email_reply_prefixes_lines() {
+        let quoted = quote_as_email_reply("Alpha\nBeta");
+        assert_eq!(quoted, "> Alpha\n> Beta");
+    }
+
+    #[test]
+    fn quote_as_email_reply_preserves_trailing_newline() {
+        let quoted = quote_as_email_reply("Alpha\n");
+        assert_eq!(quoted, "> Alpha\n> ");
     }
 }

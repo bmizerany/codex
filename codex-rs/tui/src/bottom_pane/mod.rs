@@ -314,6 +314,12 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    /// Replace composer text while keeping attachment placeholders that remain referenced.
+    pub(crate) fn set_composer_text_preserve_attachments(&mut self, text: String) {
+        self.composer.set_text_content_preserving_attachments(text);
+        self.request_redraw();
+    }
+
     #[allow(dead_code)]
     pub(crate) fn set_composer_input_enabled(
         &mut self,
