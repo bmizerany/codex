@@ -264,6 +264,11 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn set_composer_text_preserve_attachments(&mut self, text: String) {
+        self.composer.set_text_content_preserving_attachments(text);
+        self.request_redraw();
+    }
+
     pub(crate) fn clear_composer_for_ctrl_c(&mut self) {
         self.composer.clear_for_ctrl_c();
         self.request_redraw();

@@ -227,6 +227,10 @@ impl Tui {
         self.event_broker.resume_events();
     }
 
+    pub fn is_alt_screen_active(&self) -> bool {
+        self.alt_screen_active.load(Ordering::Relaxed)
+    }
+
     /// Emit a desktop notification now if the terminal is unfocused.
     /// Returns true if a notification was posted.
     pub fn notify(&mut self, message: impl AsRef<str>) -> bool {

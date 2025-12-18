@@ -332,6 +332,10 @@ pub(crate) struct ChatWidget {
     reasoning_buffer: String,
     // Accumulates full reasoning content for transcript-only recording
     full_reasoning_buffer: String,
+    // Accumulates the current agent reply text (markdown source).
+    current_agent_reply: String,
+    // Cached last completed agent reply for reply-in-editor flows.
+    last_agent_reply: Option<String>,
     // Current status header shown in the status indicator.
     current_status_header: String,
     // Previous status header to restore after a transient stream retry.
@@ -398,7 +402,20 @@ impl ChatWidget {
             && let Some(cell) = controller.finalize()
         {
             self.add_boxed_history(cell);
+            if !self.current_agent_reply.is_empty() {
+                let cached = self.current_agent_reply.clone();
+                self.cache_last_agent_reply(&cached);
+            }
+            self.current_agent_reply.clear();
         }
+    }
+
+    fn cache_last_agent_reply(&mut self, reply: &str) {
+        let trimmed = reply.trim_end_matches(['\n', '\r']);
+        if trimmed.is_empty() {
+            return;
+        }
+        self.last_agent_reply = Some(trimmed.to_string());
     }
 
     fn set_status_header(&mut self, header: String) {
@@ -558,6 +575,10 @@ impl ChatWidget {
     fn on_task_complete(&mut self, last_agent_message: Option<String>) {
         // If a stream is currently active, finalize it.
         self.flush_answer_stream_with_separator();
+        if let Some(message) = last_agent_message.as_ref() {
+            self.cache_last_agent_reply(message);
+            self.current_agent_reply.clear();
+        }
         // Mark task stopped and request redraw now that all content is in history.
         self.bottom_pane.set_task_running(false);
         self.running_commands.clear();
@@ -1102,6 +1123,11 @@ impl ChatWidget {
         self.flush_active_cell();
 
         if self.stream_controller.is_none() {
+            self.current_agent_reply.clear();
+        }
+        self.current_agent_reply.push_str(&delta);
+
+        if self.stream_controller.is_none() {
             if self.needs_final_message_separator {
                 let elapsed_seconds = self
                     .bottom_pane
@@ -1413,6 +1439,8 @@ impl ChatWidget {
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
+            current_agent_reply: String::new(),
+            last_agent_reply: None,
             current_status_header: String::from("Working"),
             retry_status_header: None,
             conversation_id: None,
@@ -1499,6 +1527,8 @@ impl ChatWidget {
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
+            current_agent_reply: String::new(),
+            last_agent_reply: None,
             current_status_header: String::from("Working"),
             retry_status_header: None,
             conversation_id: None,
@@ -3175,6 +3205,10 @@ impl ChatWidget {
         self.bottom_pane.composer_is_empty()
     }
 
+    pub(crate) fn composer_text(&self) -> String {
+        self.bottom_pane.composer_text()
+    }
+
     /// True when the UI is in the regular composer state with no running task,
     /// no modal overlay (e.g. approvals or status indicator), and no composer popups.
     /// In this state Esc-Esc backtracking is enabled.
@@ -3189,6 +3223,15 @@ impl ChatWidget {
     /// Replace the composer content with the provided text and reset cursor.
     pub(crate) fn set_composer_text(&mut self, text: String) {
         self.bottom_pane.set_composer_text(text);
+    }
+
+    pub(crate) fn set_composer_text_preserve_attachments(&mut self, text: String) {
+        self.bottom_pane
+            .set_composer_text_preserve_attachments(text);
+    }
+
+    pub(crate) fn last_agent_reply(&self) -> Option<&str> {
+        self.last_agent_reply.as_deref()
     }
 
     pub(crate) fn show_esc_backtrack_hint(&mut self) {

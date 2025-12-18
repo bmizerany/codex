@@ -44,21 +44,28 @@ use codex_protocol::openai_models::ModelUpgrade;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::bail;
+use color_eyre::eyre::eyre;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
+use tempfile::Builder;
+use tokio::process::Command;
 use tokio::select;
 use tokio::sync::mpsc::unbounded_channel;
 
@@ -108,10 +115,32 @@ fn errors_for_cwd(cwd: &Path, response: &ListSkillsResponseEvent) -> Vec<SkillEr
         .unwrap_or_default()
 }
 
+fn quote_as_email_reply(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::with_capacity(input.len() + 2 * input.lines().count());
+    for (idx, line) in input.split('\n').enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        out.push_str("> ");
+        out.push_str(line);
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionSummary {
     usage_line: String,
     resume_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditorSource {
+    ComposerText,
+    ReplyToLastAgent,
 }
 
 fn should_show_model_migration_prompt(
@@ -1150,6 +1179,34 @@ impl App {
                 self.overlay = Some(Overlay::new_transcript(self.transcript_cells.clone()));
                 tui.frame_requester().schedule_frame();
             }
+            KeyEvent {
+                code: KeyCode::Char('g'),
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Err(err) = self
+                    .open_editor_with_source(tui, EditorSource::ComposerText)
+                    .await
+                {
+                    self.chat_widget
+                        .add_error_message(format!("Editor error: {err}"));
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Char('r'),
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Err(err) = self
+                    .open_editor_with_source(tui, EditorSource::ReplyToLastAgent)
+                    .await
+                {
+                    self.chat_widget
+                        .add_error_message(format!("Editor error: {err}"));
+                }
+            }
             // Esc primes/advances backtracking only in normal (not working) mode
             // with the composer focused and empty. In any other state, forward
             // Esc so the active UI (e.g. status indicator, modals, popups)
@@ -1195,6 +1252,132 @@ impl App {
                 // Ignore Release key events.
             }
         };
+    }
+
+    async fn open_editor_with_source(
+        &mut self,
+        tui: &mut tui::Tui,
+        source: EditorSource,
+    ) -> Result<()> {
+        let current_text = self.chat_widget.composer_text();
+        let initial_text = match source {
+            EditorSource::ComposerText => current_text,
+            EditorSource::ReplyToLastAgent => {
+                let Some(last_reply) = self.chat_widget.last_agent_reply() else {
+                    self.chat_widget.add_info_message(
+                        "No agent response available to reply to yet.".to_string(),
+                        None,
+                    );
+                    return Ok(());
+                };
+                let quoted = quote_as_email_reply(last_reply);
+                let mut combined = String::new();
+                if !current_text.is_empty() {
+                    combined.push_str(&current_text);
+                    if !current_text.ends_with('\n') {
+                        combined.push('\n');
+                    }
+                    combined.push('\n');
+                }
+                combined.push_str(&quoted);
+                combined.push('\n');
+                combined.push('\n');
+                combined
+            }
+        };
+
+        let edited = self.edit_with_editor(tui, initial_text).await?;
+        self.chat_widget
+            .set_composer_text_preserve_attachments(edited);
+        Ok(())
+    }
+
+    async fn edit_with_editor(
+        &mut self,
+        tui: &mut tui::Tui,
+        initial_text: String,
+    ) -> Result<String> {
+        let tempfile = Builder::new()
+            .prefix("codex-compose-")
+            .suffix(".txt")
+            .tempfile()
+            .wrap_err("failed to create temp file for editor")?;
+
+        fs::write(tempfile.path(), initial_text)
+            .wrap_err("failed to write initial composer text to temp file")?;
+
+        let alt_screen_active = self.prepare_terminal_for_editor(tui)?;
+        let editor_cmd = self.editor_command()?;
+        let mut command = Command::new(&editor_cmd[0]);
+        if editor_cmd.len() > 1 {
+            command.args(&editor_cmd[1..]);
+        }
+        command.arg(tempfile.path());
+        command.stdin(Stdio::inherit());
+        command.stdout(Stdio::inherit());
+        command.stderr(Stdio::inherit());
+
+        let status = command.status().await;
+        self.restore_terminal_after_editor(tui, alt_screen_active);
+
+        let status = status.wrap_err("failed to run editor process")?;
+        if !status.success() {
+            bail!("editor exited with status {status}");
+        }
+
+        let edited =
+            fs::read_to_string(tempfile.path()).wrap_err("failed to read edited composer text")?;
+        Ok(edited)
+    }
+
+    fn prepare_terminal_for_editor(&mut self, tui: &mut tui::Tui) -> Result<bool> {
+        let alt_screen_active = tui.is_alt_screen_active();
+        tui.pause_events();
+        if alt_screen_active {
+            let _ = tui.leave_alt_screen();
+        }
+        if let Err(err) = crate::tui::restore() {
+            self.restore_terminal_after_editor(tui, alt_screen_active);
+            return Err(err).wrap_err("failed to restore terminal before launching editor");
+        }
+        Ok(alt_screen_active)
+    }
+
+    fn restore_terminal_after_editor(&mut self, tui: &mut tui::Tui, alt_screen_active: bool) {
+        if let Err(err) = crate::tui::set_modes() {
+            tracing::warn!(
+                error = %err,
+                "failed to re-enable terminal modes after editor session"
+            );
+        }
+        if alt_screen_active {
+            let _ = tui.enter_alt_screen();
+        }
+        tui.resume_events();
+        tui.frame_requester().schedule_frame();
+    }
+
+    fn editor_command(&self) -> Result<Vec<String>> {
+        let raw = std::env::var("VISUAL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                std::env::var("EDITOR")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .unwrap_or_else(|| {
+                if cfg!(windows) {
+                    "notepad".to_string()
+                } else {
+                    "vi".to_string()
+                }
+            });
+        let parts = shlex::split(&raw).ok_or_else(|| eyre!("failed to parse editor command"))?;
+        if parts.is_empty() {
+            bail!("editor command is empty");
+        }
+        Ok(parts)
     }
 
     #[cfg(target_os = "windows")]
@@ -1559,5 +1742,17 @@ mod tests {
             summary.resume_command,
             Some("codex resume 123e4567-e89b-12d3-a456-426614174000".to_string())
         );
+    }
+
+    #[test]
+    fn quote_as_email_reply_prefixes_lines() {
+        let quoted = quote_as_email_reply("Alpha\nBeta");
+        assert_eq!(quoted, "> Alpha\n> Beta");
+    }
+
+    #[test]
+    fn quote_as_email_reply_preserves_trailing_newline() {
+        let quoted = quote_as_email_reply("Alpha\n");
+        assert_eq!(quoted, "> Alpha\n> ");
     }
 }

@@ -299,6 +299,16 @@ impl ChatComposer {
         self.sync_popups();
     }
 
+    /// Replace the composer content while preserving attached images and any
+    /// pending paste placeholders that remain referenced in the text.
+    pub(crate) fn set_text_content_preserving_attachments(&mut self, text: String) {
+        self.textarea.set_text(&text);
+        self.textarea.set_cursor(self.textarea.text().len());
+        let current_text = self.textarea.text().to_string();
+        self.reconcile_placeholders_with_text(&current_text);
+        self.sync_popups();
+    }
+
     pub(crate) fn clear_for_ctrl_c(&mut self) -> Option<String> {
         if self.is_empty() {
             return None;
@@ -592,7 +602,7 @@ impl ChatComposer {
             self.handle_paste(pasted);
         }
         self.textarea.input(input);
-        let text_after = self.textarea.text();
+        let text_after = self.textarea.text().to_string();
         self.pending_pastes
             .retain(|(placeholder, _)| text_after.contains(placeholder));
         (InputResult::None, true)
@@ -1310,7 +1320,7 @@ impl ChatComposer {
 
         // Normal input handling
         self.textarea.input(input);
-        let text_after = self.textarea.text();
+        let text_after = self.textarea.text().to_string();
 
         // Update paste-burst heuristic for plain Char (no Ctrl/Alt) events.
         let crossterm::event::KeyEvent {
@@ -1332,32 +1342,7 @@ impl ChatComposer {
             }
         }
 
-        // Check if any placeholders were removed and remove their corresponding pending pastes
-        self.pending_pastes
-            .retain(|(placeholder, _)| text_after.contains(placeholder));
-
-        // Keep attached images in proportion to how many matching placeholders exist in the text.
-        // This handles duplicate placeholders that share the same visible label.
-        if !self.attached_images.is_empty() {
-            let mut needed: HashMap<String, usize> = HashMap::new();
-            for img in &self.attached_images {
-                needed
-                    .entry(img.placeholder.clone())
-                    .or_insert_with(|| text_after.matches(&img.placeholder).count());
-            }
-
-            let mut used: HashMap<String, usize> = HashMap::new();
-            let mut kept: Vec<AttachedImage> = Vec::with_capacity(self.attached_images.len());
-            for img in self.attached_images.drain(..) {
-                let total_needed = *needed.get(&img.placeholder).unwrap_or(&0);
-                let used_count = used.entry(img.placeholder.clone()).or_insert(0);
-                if *used_count < total_needed {
-                    kept.push(img);
-                    *used_count += 1;
-                }
-            }
-            self.attached_images = kept;
-        }
+        self.reconcile_placeholders_with_text(&text_after);
 
         (InputResult::None, true)
     }
@@ -1502,6 +1487,36 @@ impl ChatComposer {
         }
 
         false
+    }
+
+    fn reconcile_placeholders_with_text(&mut self, text_after: &str) {
+        // Drop any pending paste placeholders that are no longer present.
+        self.pending_pastes
+            .retain(|(placeholder, _)| text_after.contains(placeholder));
+
+        // Keep attached images in proportion to the number of matching placeholders.
+        if self.attached_images.is_empty() {
+            return;
+        }
+
+        let mut needed: HashMap<String, usize> = HashMap::new();
+        for img in &self.attached_images {
+            needed
+                .entry(img.placeholder.clone())
+                .or_insert_with(|| text_after.matches(&img.placeholder).count());
+        }
+
+        let mut used: HashMap<String, usize> = HashMap::new();
+        let mut kept: Vec<AttachedImage> = Vec::with_capacity(self.attached_images.len());
+        for img in self.attached_images.drain(..) {
+            let total_needed = *needed.get(&img.placeholder).unwrap_or(&0);
+            let used_count = used.entry(img.placeholder.clone()).or_insert(0);
+            if *used_count < total_needed {
+                kept.push(img);
+                *used_count += 1;
+            }
+        }
+        self.attached_images = kept;
     }
 
     fn handle_shortcut_overlay_key(&mut self, key_event: &KeyEvent) -> bool {
@@ -3178,6 +3193,51 @@ mod tests {
         assert_eq!(imgs.len(), 1);
         assert_eq!(imgs[0], path);
         assert!(composer.attached_images.is_empty());
+    }
+
+    #[test]
+    fn set_text_preserving_attachments_keeps_images_when_placeholder_present() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        let path = PathBuf::from("/tmp/image-preserve.png");
+        composer.attach_image(path.clone(), 12, 6, "PNG");
+        let placeholder = composer.attached_images[0].placeholder.clone();
+
+        let new_text = format!("{placeholder} with reply text");
+        composer.set_text_content_preserving_attachments(new_text.clone());
+
+        assert_eq!(composer.attached_images.len(), 1);
+        assert_eq!(composer.attached_images[0].path, path);
+        assert_eq!(composer.current_text(), new_text);
+    }
+
+    #[test]
+    fn set_text_preserving_attachments_drops_images_when_placeholder_removed() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        let path = PathBuf::from("/tmp/image-drop.png");
+        composer.attach_image(path, 8, 4, "PNG");
+
+        composer.set_text_content_preserving_attachments("detached".to_string());
+
+        assert!(composer.attached_images.is_empty());
+        assert_eq!(composer.current_text(), "detached");
     }
 
     #[test]
