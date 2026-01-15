@@ -755,8 +755,8 @@ impl ChatWidget {
             self.cache_last_agent_reply(message);
             self.current_agent_reply.clear();
         } else if !self.current_agent_reply.is_empty() {
-            self.cache_last_agent_reply(&self.current_agent_reply);
-            self.current_agent_reply.clear();
+            let reply = std::mem::take(&mut self.current_agent_reply);
+            self.cache_last_agent_reply(&reply);
         }
         // Mark task stopped and request redraw now that all content is in history.
         self.agent_turn_running = false;
