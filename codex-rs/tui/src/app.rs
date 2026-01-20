@@ -1417,9 +1417,7 @@ impl App {
 
         match editor_result {
             Ok(new_text) => {
-                // Trim trailing whitespace
-                let cleaned = new_text.trim_end().to_string();
-                self.chat_widget.apply_external_edit(cleaned);
+                self.chat_widget.apply_external_edit(new_text);
             }
             Err(err) => {
                 self.chat_widget
